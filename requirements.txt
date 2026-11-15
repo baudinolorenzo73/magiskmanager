@@ -1,0 +1,4 @@
+# App Android (Kivy). Le dipendenze vere sono in buildozer.spec.
+# Questo file serve solo per provare l'interfaccia su un computer.
+kivy==2.3.0
+certifi
