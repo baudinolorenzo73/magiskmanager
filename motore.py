@@ -13,9 +13,10 @@ import hashlib
 import subprocess
 import urllib.request
 import urllib.error
+import urllib.parse
 from pathlib import Path
 
-VERSIONE = "1.0"
+VERSIONE = "1.4"
 MARCHIO = "by Lollo ®2026"
 MODULI_DIR = "/data/adb/modules"
 CHECKER_REPO = "1nikolas/play-integrity-checker-app"
@@ -73,6 +74,36 @@ CATALOGO_BASE = [
      "desc": "Blocco pubblicità/tracker a livello di sistema tramite file hosts (systemless).",
      "req": "Nessuno in particolare.",
      "avviso": "Blocchi troppo aggressivi possono rompere alcune app."},
+    {"nome": "NeoZygisk", "categoria": "Zygisk",
+     "repo": "JingMatrix/NeoZygisk", "pattern": r"\.zip$", "ids": ["zygisksu"],
+     "desc": "Implementazione di Zygisk indipendente da Magisk, mantenuta insieme a LSPosed.",
+     "req": "Zygisk integrato di Magisk DISATTIVATO. Non usarlo con Zygisk Next o ReZygisk.",
+     "avviso": "Tre implementazioni diverse (Zygisk Next, NeoZygisk, ReZygisk): ne serve UNA sola."},
+    {"nome": "ReZygisk", "categoria": "Zygisk",
+     "repo": "PerformanC/ReZygisk", "pattern": r"\.zip$", "ids": ["rezygisk"],
+     "desc": "Altra implementazione di Zygisk, open source, per Magisk, KernelSU e APatch.",
+     "req": "Zygisk integrato di Magisk DISATTIVATO. Non usarlo con Zygisk Next o NeoZygisk.",
+     "avviso": "Ne serve UNA sola tra Zygisk Next, NeoZygisk e ReZygisk."},
+    {"nome": "Tricky Addons", "categoria": "Nascondere root",
+     "repo": "KOWX712/Tricky-Addons-Update-Target-List", "pattern": r"\.zip$", "ids": [],
+     "desc": "Aggiunge a Tricky Store la gestione comoda dell'elenco delle app da trattare.",
+     "req": "Tricky Store installato.",
+     "avviso": "Controlla il README: il nome dei file di release puo cambiare."},
+    {"nome": "Zygisk Detach", "categoria": "App",
+     "repo": "j-hc/zygisk-detach", "pattern": r"\.zip$", "ids": [],
+     "desc": "Impedisce al Play Store di aggiornare le app che scegli (utile per app modificate).",
+     "req": "Zygisk attivo.",
+     "avviso": "Le app scelte non si aggiornano piu dal Play Store finche non le riattivi."},
+    {"nome": "Trust User Certs", "categoria": "Rete",
+     "repo": "NVISOsecurity/MagiskTrustUserCerts", "pattern": r"\.zip$", "ids": [],
+     "desc": "Fa considerare attendibili i certificati installati dall'utente anche alle app di sistema.",
+     "req": "Nessuno in particolare.",
+     "avviso": "Serve per analisi del traffico (es. proxy): non lasciare certificati sconosciuti."},
+    {"nome": "MagiskFrida", "categoria": "Sviluppo",
+     "repo": "ViRb3/magisk-frida", "pattern": r"\.zip$", "ids": [],
+     "desc": "Avvia frida-server all'accensione: strumento di analisi per sviluppatori.",
+     "req": "Uso avanzato.",
+     "avviso": "Solo per sviluppo e test: non serve all'uso normale."},
 ]
 
 
@@ -329,6 +360,114 @@ def catalogo_completo():
     return voci
 
 
+def _leggi_extra():
+    try:
+        with open(_file_catalogo(), encoding="utf-8") as f:
+            voci = json.load(f)
+        return voci if isinstance(voci, list) else []
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return []
+
+
+def repo_gia_presente(repo):
+    return any(v.get("repo", "").lower() == repo.lower() for v in catalogo_completo())
+
+
+def cerca_github(testo="", quanti=15):
+    """Cerca su GitHub repository con l'argomento 'magisk-module'.
+    Ritorna una lista di dict(repo, desc, stelle, aggiornato, archiviato)."""
+    q = (testo.strip() + " " if testo.strip() else "") + "topic:magisk-module"
+    url = ("https://api.github.com/search/repositories?q=" + urllib.parse.quote(q)
+           + f"&sort=stars&order=desc&per_page={int(quanti)}")
+    try:
+        dati = http_json(url)
+    except urllib.error.HTTPError as e:
+        if e.code in (403, 429):
+            raise RuntimeError("Troppe ricerche su GitHub: aspetta un minuto e riprova") from e
+        raise
+    return [{"repo": r["full_name"], "desc": (r.get("description") or "")[:160],
+             "stelle": r.get("stargazers_count", 0),
+             "aggiornato": (r.get("pushed_at") or "")[:10],
+             "archiviato": bool(r.get("archived"))} for r in dati.get("items", [])]
+
+
+_RE_REPO = re.compile(r"[\w.-]+/[\w.-]+")
+
+
+def _repo_da_testo(s):
+    """Accetta 'proprietario/nome' oppure un indirizzo github.com/proprietario/nome."""
+    s = s.strip().strip(",;")
+    m = re.match(r"https?://github\.com/([\w.-]+)/([\w.-]+?)(?:\.git)?(?:/.*)?$", s)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}"
+    return s if _RE_REPO.fullmatch(s) else None
+
+
+def importa_catalogo(sorgente):
+    """Importa voci nel catalogo personale. La sorgente puo essere:
+    un elenco JSON incollato, un indirizzo web a un file JSON, il percorso di un file,
+    un indirizzo github.com/proprietario/nome oppure piu 'proprietario/nome' separati da spazi.
+    Ritorna (ok, messaggio)."""
+    s = (sorgente or "").strip()
+    if not s:
+        return False, "Incolla un indirizzo, un percorso o un elenco"
+    voci_in = None
+    try:
+        if s[0] in "[{":
+            voci_in = json.loads(s)
+        elif _repo_da_testo(s):
+            voci_in = [s]
+        elif s.lower().startswith(("http://", "https://")):
+            with http_get(s, 30) as r:
+                voci_in = json.loads(r.read(1048576).decode("utf-8", "replace"))
+        elif Path(s).expanduser().is_file():
+            with open(Path(s).expanduser(), encoding="utf-8") as f:
+                voci_in = json.load(f)
+        else:
+            voci_in = [x for x in re.split(r"[\s,;]+", s) if x]
+    except (json.JSONDecodeError, OSError, urllib.error.URLError, TimeoutError) as e:
+        return False, f"Non riesco a leggere la sorgente: {str(e)[:80]}"
+    if isinstance(voci_in, dict):
+        voci_in = voci_in.get("moduli") or voci_in.get("modules") or [voci_in]
+    if not isinstance(voci_in, list):
+        return False, "Formato non riconosciuto: serve un elenco di moduli"
+
+    extra = _leggi_extra()
+    note = {"agg": 0, "dup": 0, "scarto": 0}
+    for v in voci_in[:300]:
+        if isinstance(v, str):
+            v = {"repo": v}
+        repo = _repo_da_testo(str(v.get("repo", ""))) if isinstance(v, dict) else None
+        if not repo:
+            note["scarto"] += 1
+            continue
+        if repo_gia_presente(repo) or any(e.get("repo", "").lower() == repo.lower() for e in extra):
+            note["dup"] += 1
+            continue
+        pattern = str(v.get("pattern") or r"\.zip$")
+        try:
+            re.compile(pattern)
+        except re.error:
+            pattern = r"\.zip$"
+        ids = v.get("ids") if isinstance(v.get("ids"), list) else []
+        extra.append({"nome": str(v.get("nome") or repo.split("/")[1])[:60],
+                      "categoria": str(v.get("categoria") or "Importato")[:30],
+                      "repo": repo, "pattern": pattern, "ids": [str(i) for i in ids][:5],
+                      "desc": str(v.get("desc") or "Modulo importato")[:300],
+                      "req": str(v.get("req") or "Vedi il README del progetto.")[:300],
+                      "avviso": str(v.get("avviso") or
+                                    "Voce importata: controlla l'affidabilita della fonte.")[:300]})
+        note["agg"] += 1
+    if note["agg"]:
+        scrivi_json_atomico(_file_catalogo(), extra)
+    testo = f"Importati {note['agg']}"
+    if note["dup"]:
+        testo += f", gia presenti {note['dup']}"
+    if note["scarto"]:
+        testo += f", scartati {note['scarto']}"
+    return note["agg"] > 0, testo
+
+
 def aggiungi_voce_catalogo(repo, descrizione="", pattern=r"\.zip$"):
     """Aggiunge un repo GitHub al catalogo personale. Ritorna (ok, messaggio)."""
     repo = (repo or "").strip()
@@ -338,13 +477,9 @@ def aggiungi_voce_catalogo(repo, descrizione="", pattern=r"\.zip$"):
         re.compile(pattern)
     except re.error:
         return False, "Regex non valida"
-    try:
-        with open(_file_catalogo(), encoding="utf-8") as f:
-            voci = json.load(f)
-        if not isinstance(voci, list):
-            voci = []
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        voci = []
+    if repo_gia_presente(repo):
+        return False, "Questo repository e gia nel catalogo"
+    voci = _leggi_extra()
     voci.append({"nome": repo.split("/")[1], "categoria": "Personale", "repo": repo,
                  "pattern": pattern, "ids": [], "desc": descrizione or "Modulo personalizzato",
                  "req": "Vedi il README del progetto.",
@@ -466,3 +601,99 @@ def avvia_checker():
         return False, "App checker non trovata tra i pacchetti installati"
     rc, _, _ = su(f"monkey -p {shlex.quote(pkg)} -c android.intent.category.LAUNCHER 1")
     return (rc == 0), (f"Avviata: {pkg}" if rc == 0 else "Non riesco ad avviarla: aprila dal cassetto delle app")
+
+
+# ───────────────────────── Recupero: copia dell'immagine di boot ─────────────────────────
+CARTELLA_BACKUP_BOOT = "/sdcard/MagiskManager/backup-boot"
+
+
+def partizioni_boot():
+    """Cerca le partizioni boot e init_boot (con l'eventuale slot A/B).
+    Ritorna (suffisso_slot, [(nome, dispositivo)])."""
+    suffisso = prop("ro.boot.slot_suffix")
+    trovate = []
+    for nome in ("boot", "init_boot"):
+        for cand in ([nome + suffisso, nome] if suffisso else [nome]):
+            script = ("for d in /dev/block/by-name /dev/block/bootdevice/by-name "
+                      "/dev/block/platform/*/by-name /dev/block/platform/*/*/by-name; do "
+                      f"[ -e \"$d/{cand}\" ] && echo \"$d/{cand}\" && break; done")
+            rc, out, _ = su(script)
+            dev = out.strip().splitlines()[0] if rc == 0 and out.strip() else ""
+            if dev:
+                trovate.append((nome, dev))
+                break
+    return suffisso, trovate
+
+
+def _spazio_libero_mb(cartella):
+    rc, out, _ = su(f"df -k {shlex.quote(cartella)} | tail -n 1")
+    try:
+        return int(out.split()[3]) // 1024
+    except (IndexError, ValueError):
+        return None
+
+
+def backup_boot(scrivi=lambda m: None):
+    """Copia boot (e init_boot se c'e) in /sdcard/MagiskManager/backup-boot.
+    Ritorna (ok, righe_riassunto). scrivi(msg) riceve l'avanzamento."""
+    q = shlex.quote
+    if not root_ok():
+        return False, ["Root non disponibile"]
+    suffisso, parti = partizioni_boot()
+    if not parti:
+        return False, ["Non trovo la partizione di boot su questo telefono: "
+                       "non faccio nulla per non rischiare."]
+    scrivi(f"Slot: {suffisso or 'nessuno (non A/B)'} - partizioni: "
+           + ", ".join(n for n, _ in parti))
+    cartella = CARTELLA_BACKUP_BOOT
+    rc, _, err = su(f"mkdir -p {q(cartella)}")
+    if rc != 0:
+        return False, [f"Non riesco a creare la cartella {cartella}: {err.strip()}"]
+    data = __import__("time").strftime("%Y%m%d-%H%M%S")
+    riassunto, tutto_ok = [], True
+    for nome, dev in parti:
+        rc, out, _ = su(f"blockdev --getsize64 {q(dev)}")
+        try:
+            dim = int(out.strip())
+        except ValueError:
+            dim = 0
+        libero = _spazio_libero_mb(cartella)
+        if dim and libero is not None and libero < dim // 1048576 + 50:
+            riassunto.append(f"{nome}: spazio insufficiente ({libero} MB liberi)")
+            tutto_ok = False
+            continue
+        dest = f"{cartella}/{nome}{suffisso}_{data}.img"
+        scrivi(f"Copio {nome} ({dim // 1048576} MB)...")
+        rc, _, err = su(f"dd if={q(dev)} of={q(dest)} bs=4194304", 600)
+        rc2, out2, _ = su(f"wc -c < {q(dest)}")
+        try:
+            copiato = int(out2.strip())
+        except ValueError:
+            copiato = -1
+        if rc != 0 or (dim and copiato != dim):
+            riassunto.append(f"{nome}: copia NON riuscita ({copiato} byte su {dim}) {err.strip()[:80]}")
+            tutto_ok = False
+            su(f"rm -f {q(dest)}")
+            continue
+        scrivi(f"Calcolo l'impronta SHA-256 di {nome}...")
+        _, h, _ = su(f"sha256sum {q(dest)}", 300)
+        impronta = h.split()[0] if h.split() else "?"
+        su(f"echo {q(impronta + '  ' + dest.rsplit('/', 1)[1])} > {q(dest + '.sha256')}")
+        riassunto.append(f"{nome}: OK, {copiato // 1048576} MB, SHA-256 {impronta[:16]}...")
+    # Copia originale di fabbrica che Magisk conserva dopo la sua installazione
+    rc, out, _ = su("ls -d /data/magisk_backup_* 2>/dev/null | head -n 1")
+    cartella_mg = out.strip()
+    if rc == 0 and cartella_mg:
+        for nome, _ in parti:
+            sorgente = f"{cartella_mg}/{nome}.img.gz"
+            if file_esiste(sorgente):
+                rc3, _, _ = su(f"cp {q(sorgente)} {q(cartella + '/originale-' + nome + '_' + data + '.img.gz')}")
+                riassunto.append(f"Originale di fabbrica ({nome}) copiato da Magisk"
+                                 if rc3 == 0 else f"Originale {nome}: copia non riuscita")
+    return tutto_ok, riassunto
+
+
+def elenco_backup_boot():
+    rc, out, _ = su(f"ls -lh {shlex.quote(CARTELLA_BACKUP_BOOT)} 2>/dev/null")
+    righe = [r for r in out.splitlines() if r.strip() and not r.startswith("total")]
+    return rc == 0, righe

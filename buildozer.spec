@@ -5,7 +5,7 @@ package.domain = it.lollo
 source.dir = .
 source.include_exts = py,png
 source.exclude_dirs = .github,icone,bin,.buildozer
-version = 1.2
+version = 1.4
 requirements = python3,kivy==2.3.0,openssl,certifi
 orientation = portrait
 fullscreen = 0

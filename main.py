@@ -177,6 +177,42 @@ class Operazione:
         Clock.schedule_once(lambda dt: setattr(self.chiudi, "disabled", False))
 
 
+GUIDA_RECUPERO = [
+    ("Come funzionano i moduli",
+     "Ogni modulo è una cartella in /data/adb/modules/<id>. Un file vuoto 'disable' dentro la "
+     "cartella lo spegne al prossimo avvio. Un file vuoto 'remove' lo cancella al prossimo avvio."),
+    ("Se il telefono non parte: dalla recovery (TWRP, OrangeFox)",
+     "1) Spegni e avvia la recovery (di solito Volume su + Accensione).\n"
+     "2) Se chiede PIN o schema, inseriscilo: senza sbloccare, /data risulta vuoto.\n"
+     "3) Apri Avanzate > Terminale.\n"
+     "4) Elenca i moduli:  ls /data/adb/modules\n"
+     "5) Spegni un modulo:  touch /data/adb/modules/ID/disable\n"
+     "6) Spegni tutti:  for d in /data/adb/modules/*/; do touch \"$d/disable\"; done\n"
+     "7) Per cancellare invece di spegnere usa 'remove' al posto di 'disable'.\n"
+     "8) Riavvia. Se parte, riattiva i moduli uno alla volta per trovare il colpevole.\n"
+     "La recovery originale (stock) di solito non ha il terminale e non legge /data cifrato."),
+    ("Se il telefono non parte: dal PC con ADB",
+     "Collega il cavo e, dal PC, scrivi:\n"
+     "adb wait-for-device shell magisk --remove-modules\n"
+     "Aspetta il telefono e toglie tutti i moduli. Funziona se ADB risponde durante l'avvio."),
+    ("Protezione automatica di Magisk",
+     "Dopo alcuni avvii falliti di fila Magisk spegne da solo i moduli. Dipende dalla versione: "
+     "non farci affidamento come unica via."),
+    ("Se Magisk stesso non funziona più",
+     "Rinomina Magisk.apk in uninstall.zip e installalo dalla recovery: toglie Magisk e tutti i "
+     "moduli (e il root)."),
+    ("Ripristinare l'immagine di boot",
+     "Dal PC, con il telefono in modalità fastboot (Volume giù + Accensione) e il cavo:\n"
+     "fastboot flash boot boot_....img\n"
+     "Se il telefono usa init_boot:  fastboot flash init_boot init_boot_....img\n"
+     "Sui telefoni A/B il nome include lo slot (boot_a / boot_b): ripristina quello attivo.\n"
+     "Il file 'originale-....img.gz' va prima decompresso:  gunzip nomefile.img.gz\n"
+     "Con il bootloader bloccato fastboot rifiuta: usa solo l'immagine originale e solo se sai "
+     "cosa stai facendo. Un'immagine di un altro telefono o di un'altra versione può "
+     "impedire l'avvio."),
+]
+
+
 def flusso_download(titolo, url, nome_file, tipo, dopo=None):
     """Scarica un file e lo installa. tipo: 'zip' (modulo Magisk) oppure 'apk'."""
     op = Operazione(titolo)
@@ -241,7 +277,7 @@ class MagiskApp(App):
     title = "Magisk Manager"
 
     SCHEDE = [("stato", "Stato"), ("moduli", "Moduli"), ("aggiorna", "Aggiorna"),
-              ("installa", "Installa"), ("integrita", "Integrita")]
+              ("installa", "Installa"), ("integrita", "Integrita"), ("recupero", "Recupero")]
 
     def build(self):
         mt.imposta_cartella(self.user_data_dir)
@@ -444,6 +480,30 @@ class MagiskApp(App):
         z.add_widget(bottone("Installa ZIP", self.installa_zip_locale))
         pag.aggiungi(z)
 
+        c = Scheda()
+        c.add_widget(Testo("[b]Cerca nuovi moduli su GitHub[/b]\n"
+                           "Cerca i progetti con l'argomento magisk-module, dai piu popolari. "
+                           "Scrivi una parola (es. hosts, font, audio) oppure lascia vuoto.",
+                           dimensione=14))
+        self.campo_cerca = campo("parola da cercare (facoltativa)")
+        c.add_widget(self.campo_cerca)
+        c.add_widget(bottone("Cerca su GitHub", self.cerca_moduli))
+        pag.aggiungi(c)
+        self.box_ris = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(10))
+        self.box_ris.bind(minimum_height=self.box_ris.setter("height"))
+        pag.aggiungi(self.box_ris)
+
+        i = Scheda()
+        i.add_widget(Testo("[b]Importa nel catalogo[/b]\n"
+                           "Incolla uno di questi: indirizzo github.com/proprietario/nome, "
+                           "piu voci proprietario/nome separate da spazio, un indirizzo web a un "
+                           "file .json con l'elenco, oppure il percorso di un file .json.",
+                           dimensione=14))
+        self.campo_import = campo("indirizzo, elenco o percorso")
+        i.add_widget(self.campo_import)
+        i.add_widget(bottone("Importa", self.importa_voci, BTN_GRIGIO))
+        pag.aggiungi(i)
+
         a = Scheda()
         a.add_widget(Testo("[b]Aggiungi un repo GitHub al catalogo[/b]"))
         self.campo_repo = campo("proprietario/nome")
@@ -473,6 +533,58 @@ class MagiskApp(App):
                                                  rel["nome_file"], "zip"))
         in_background(lambda: mt.github_release(v["repo"], v["pattern"]), finito)
 
+    def cerca_moduli(self):
+        self.box_ris.clear_widgets()
+        self.messaggio("Cerco su GitHub...")
+        testo = self.campo_cerca.text
+
+        def finito(ris):
+            self.messaggio("")
+            if isinstance(ris, Exception):
+                self.messaggio(f"Errore: {ris}")
+                return
+            if not ris:
+                self.messaggio("Nessun risultato: prova un'altra parola")
+                return
+            for r in ris:
+                gia = mt.repo_gia_presente(r["repo"])
+                s = Scheda()
+                s.add_widget(Testo(
+                    f"[b]{esc(r['repo'])}[/b]  [size=12sp]{r['stelle']} stelle - "
+                    f"aggiornato {esc(r['aggiornato'])}"
+                    f"{'  - ARCHIVIATO' if r['archiviato'] else ''}"
+                    f"{'  - GIA NEL CATALOGO' if gia else ''}[/size]\n"
+                    f"{esc(r['desc'] or 'Nessuna descrizione')}", dimensione=14))
+                if not gia:
+                    v = {"nome": r["repo"].split("/")[1], "repo": r["repo"],
+                         "pattern": r"\.zip$"}
+                    s.add_widget(riga_bottoni(
+                        bottone("Aggiungi", lambda rr=r: self.aggiungi_trovato(rr), BTN_GRIGIO),
+                        bottone("Aggiungi e installa",
+                                lambda rr=r, vv=v: self.aggiungi_trovato(rr, vv))))
+                self.box_ris.add_widget(s)
+            self.messaggio(f"{len(ris)} risultati. Controlla sempre l'affidabilita della fonte.")
+        in_background(lambda: mt.cerca_github(testo), finito)
+
+    def aggiungi_trovato(self, r, installa_voce=None):
+        ok, msg = mt.aggiungi_voce_catalogo(r["repo"], r["desc"])
+        self.messaggio(msg)
+        if ok and installa_voce:
+            self.avvia_voce(installa_voce)
+
+    def importa_voci(self):
+        self.messaggio("Importo...")
+        sorgente = self.campo_import.text
+
+        def finito(ris):
+            if isinstance(ris, Exception):
+                self.messaggio(f"Errore: {ris}")
+                return
+            self.messaggio(ris[1])
+            if ris[0]:
+                self.carica_installa()
+        in_background(lambda: mt.importa_catalogo(sorgente), finito)
+
     def installa_zip_locale(self):
         percorso = self.campo_zip.text.strip()
         if not percorso.lower().endswith(".zip"):
@@ -486,6 +598,65 @@ class MagiskApp(App):
         self.messaggio(msg)
         if ok:
             self.carica_installa()
+
+    # --- Recupero: copia immagine di boot + guida ---
+    def carica_recupero(self):
+        self.pagine["recupero"].carica(self._dati_recupero, self.disegna_recupero)
+
+    @staticmethod
+    def _dati_recupero():
+        if not mt.root_ok():
+            return {"root": False}
+        return {"root": True, "backup": mt.elenco_backup_boot()[1]}
+
+    def disegna_recupero(self, d):
+        pag = self.pagine["recupero"]
+        b = Scheda()
+        b.add_widget(Testo(
+            "[b]Copia dell'immagine di boot[/b]\n"
+            "Salva boot (e init_boot se il telefono la usa) in "
+            f"{esc(mt.CARTELLA_BACKUP_BOOT)}. Serve per ripristinare il telefono se un "
+            "modulo o un aggiornamento lo manda in bootloop.\n"
+            "[color=ffd34d]Con Magisk installato la copia contiene Magisk.[/color] "
+            "Se Magisk ha conservato l'originale di fabbrica, viene copiato anche quello "
+            "(file 'originale-...').", dimensione=14))
+        if d["root"]:
+            b.add_widget(bottone("Copia ora l'immagine di boot", self.avvia_backup_boot))
+            if d["backup"]:
+                b.add_widget(Testo("[b]Copie già presenti[/b]\n"
+                                   + "\n".join(esc(r) for r in d["backup"][-8:]), dimensione=12))
+        else:
+            b.add_widget(Testo("[color=ff5555]Root non disponibile: la copia non si può fare. "
+                               "La guida qui sotto vale comunque.[/color]"))
+        pag.aggiungi(b)
+        for titolo, testo in GUIDA_RECUPERO:
+            s = Scheda()
+            s.add_widget(Testo(f"[b]{esc(titolo)}[/b]\n{esc(testo)}", dimensione=14))
+            pag.aggiungi(s)
+
+    def avvia_backup_boot(self):
+        conferma("Copia immagine di boot",
+                 "Leggo la partizione di boot (non la modifico) e la copio nella memoria "
+                 "del telefono. Servono circa 100-200 MB liberi. Procedo?",
+                 self._esegui_backup_boot)
+
+    def _esegui_backup_boot(self):
+        op = Operazione("Copia immagine di boot")
+
+        def lavoro():
+            return mt.backup_boot(op.scrivi)
+
+        def finito(ris):
+            if isinstance(ris, Exception):
+                op.scrivi(f"Errore: {ris}")
+            else:
+                op.scrivi("")
+                for r in ris[1]:
+                    op.scrivi(r)
+                op.stato("Fatto." if ris[0] else "Completato con problemi: leggi sopra.")
+            op.fine()
+            self.carica_recupero()
+        in_background(lavoro, finito)
 
     # --- Integrità (SafetyNet / Play Integrity) ---
     def carica_integrita(self):

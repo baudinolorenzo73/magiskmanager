@@ -2,14 +2,14 @@
   "id": "./",
   "name": "Magisk Manager",
   "short_name": "Magisk Manag",
-  "description": "Gestione moduli Magisk e controllo Play Integrity by Lollo ®2026",
+  "description": "Magisk Manager by Lollo ®2026",
   "lang": "it",
   "dir": "ltr",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "background_color": "#eef1f7",
-  "theme_color": "#0b3d1e",
+  "theme_color": "#0f3d1a",
   "icons": [
     {
       "src": "icone/icona-192.png",
